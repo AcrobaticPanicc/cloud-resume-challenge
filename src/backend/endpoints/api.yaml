@@ -1,0 +1,28 @@
+swagger: '2.0'
+securityDefinitions:
+    api_key:
+        type: "apiKey"
+        name: "key"
+        in: "query"
+info:
+    title: Cloud Endpoints + GCF
+    description: Sample API on Cloud Endpoints with a Google Cloud Functions backend
+    version: 1.0.0
+host: cr-proxy-kcory2ywjq-uc.a.run.app
+schemes:
+    - https
+produces:
+    - application/json
+paths:
+    /increment_visitor_count:
+        get:
+            summary: increment the visitor count
+            operationId: increment
+            x-google-backend:
+                address: https://us-central1-cloud-resume-project-1234.cloudfunctions.net/increment_visitor_count
+                protocol: h2
+            responses:
+                '200':
+                    description: A successful response
+                    schema:
+                        type: string

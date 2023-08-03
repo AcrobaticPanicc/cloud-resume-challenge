@@ -1,0 +1,128 @@
+name: CI/CD Pipeline
+
+#on:
+#    push:
+#        branches:
+#            - main
+
+env:
+    TF_VERSION: 'latest'
+    TF_INIT_CLI_OPTIONS: '-input=false'
+    TF_CLI_OPTIONS: '-input=false'
+    TF_VAR_project_id: 'cloud-resume-project-1234'
+    GCP_PROJECT_ID: 'cloud-resume-project-1234'
+
+defaults:
+    run:
+        shell: bash
+
+jobs:
+    setup:
+        runs-on: ubuntu-latest
+        outputs:
+            gcp_key: ${{ steps.set_gcp_key.outputs.key }}
+        steps:
+            -   name: Checkout repository
+                uses: actions/checkout@v2
+
+            -   name: Setup Google Cloud credentials
+                id: set_gcp_key
+                env:
+                    GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+                run: echo "$GOOGLE_CREDENTIALS" > gcp-key.json
+
+            -   name: Set up Cloud SDK
+                uses: 'google-github-actions/setup-gcloud@v1'
+                with:
+                    project_id: ${{ env.GCP_PROJECT_ID }}
+                    service_account_key: ${{ secrets.GCP_SA_KEY }}
+                    export_default_credentials: true
+
+            -   name: Archive gcp-key.json as an artifact
+                uses: actions/upload-artifact@v2
+                with:
+                    name: gcp-key
+                    path: gcp-key.json
+
+    terraform:
+        needs: setup
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: ./terraform
+        steps:
+            -   uses: actions/checkout@v2
+            -   name: Setup Terraform
+                uses: hashicorp/setup-terraform@v1
+                with:
+                    terraform_version: ${{ env.TF_VERSION }}
+                    cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+            -   name: Terraform Init
+                run: terraform init ${{ env.TF_INIT_CLI_OPTIONS }}
+
+            -   name: Terraform Apply
+                run: terraform apply ${{ env.TF_CLI_OPTIONS }} -auto-approve
+                env:
+                    GOOGLE_APPLICATION_CREDENTIALS: ./gcp-key.json
+
+
+    unit-tests:
+        name: Run Unit Tests
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout repository
+                uses: actions/checkout@v2
+
+            -   name: Set up Python
+                uses: actions/setup-python@v2
+                with:
+                    python-version: 3.9
+
+            -   name: Install Dependencies for Cloud Run
+                run: |
+                    cd ./src/backend/cloud-run
+                    pip install -r requirements.txt
+
+            -   name: Run Cloud Run Tests
+                run: |
+                    cd ./src/backend/cloud-run
+                    python -m unittest test_integration.py
+
+            -   name: Install Dependencies for Cloud Function
+                run: |
+                    cd ./src/backend/cloud-function
+                    pip install -r requirements.txt
+
+            -   name: Run Cloud Function Tests
+                run: |
+                    cd ./src/backend/cloud-function
+                    python -m unittest test_main.py
+
+
+    build-and-deploy:
+        needs: [ setup, terraform, unit-tests ]
+        runs-on: ubuntu-latest
+        steps:
+            -   uses: actions/checkout@v2
+
+            -   name: Download gcp-key.json artifact
+                uses: actions/download-artifact@v3
+                with:
+                    name: gcp-key
+
+            -   name: Deploy Cloud Function
+                run: |
+                    gcloud auth activate-service-account --key-file=gcp-key.json
+                    cd ./src/backend/cloud-function
+                    gcloud functions deploy increment_visitor_count --source ./ --runtime python310 --project cloud-resume-project-1234 --trigger-http --allow-unauthenticated
+
+            -   name: Build and Deploy Cloud Run Service
+                run: |
+                    cd ./src/backend/cloud-run
+                    gcloud builds submit --tag gcr.io/${{ env.GCP_PROJECT_ID }}/cloud-run-service
+                    gcloud run deploy --image gcr.io/${{ env.GCP_PROJECT_ID }}/cloud-run-service --platform managed
+
+            -   name: Deploy Frontend
+                run: |
+                    gsutil cp ./src/frontend/index.html gs://${{ env.TF_VAR_bucket_name }}/index.html
